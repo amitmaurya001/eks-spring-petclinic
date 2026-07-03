@@ -189,7 +189,15 @@ jobs:
       - name: Build services list
         id: build_services
         run: |
-          echo "services=$(echo \"${{ needs.detect-changes.outputs.config-server == 'true' && 'config-server' || '' }} ${{ needs.detect-changes.outputs.discovery-server == 'true' && 'discovery-server' || '' }} ${{ needs.detect-changes.outputs.api-gateway == 'true' && 'api-gateway' || '' }} ${{ needs.detect-changes.outputs.customers-service == 'true' && 'customers-service' || '' }} ${{ needs.detect-changes.outputs.visits-service == 'true' && 'visits-service' || '' }} ${{ needs.detect-changes.outputs.vets-service == 'true' && 'vets-service' || '' }} ${{ needs.detect-changes.outputs.genai-service == 'true' && 'genai-service' || '' }} ${{ needs.detect-changes.outputs.admin-server == 'true' && 'admin-server' || '' }}\" | xargs)" >> $GITHUB_OUTPUT
+          TRUES=$(echo "${{ needs.detect-changes.outputs.config-server == 'true' && 'config-server' || '' }}
+${{ needs.detect-changes.outputs.discovery-server == 'true' && 'discovery-server' || '' }}
+${{ needs.detect-changes.outputs.api-gateway == 'true' && 'api-gateway' || '' }}
+${{ needs.detect-changes.outputs.customers-service == 'true' && 'customers-service' || '' }}
+${{ needs.detect-changes.outputs.visits-service == 'true' && 'visits-service' || '' }}
+${{ needs.detect-changes.outputs.vets-service == 'true' && 'vets-service' || '' }}
+${{ needs.detect-changes.outputs.genai-service == 'true' && 'genai-service' || '' }}
+${{ needs.detect-changes.outputs.admin-server == 'true' && 'admin-server' || '' }}" | grep -v '^$' | tr '\n' ' ' | xargs)
+          echo "services=${TRUES}" >> "$GITHUB_OUTPUT"
 
       - name: Fire repository_dispatch
         uses: peter-evans/repository-dispatch@v3
@@ -197,4 +205,8 @@ jobs:
           token: ${{ secrets.PLATFORM_REPO_TOKEN }}
           repository: ${{ vars.PLATFORM_REPO }}
           event-type: app-image-built
-          client-payload: '{"sha": "${{ github.sha }}", "services": "${{ steps.build_services.outputs.services }}"}'
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}",
+              "services": "${{ steps.build_services.outputs.services }}"
+            }
