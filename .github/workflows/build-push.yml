@@ -201,9 +201,3 @@ jobs:
           repository: ${{ vars.PLATFORM_REPO }}
           event-type: app-image-built
           client-payload: '{"sha": "${{ github.sha }}"}'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
-          repository: ${{ vars.PLATFORM_REPO }}
-          event-type: app-image-built
-          client-payload: '{"sha": "${{ steps.services.outputs.sha }}", "services": "${{ steps.services.outputs.services }}"}'
