@@ -1,0 +1,69 @@
+# Reusable — ECR Login (OIDC + ECR auth)
+# ==========================================
+#
+# Encapsulates the three-step OIDC-ECR dance:
+#   1. configure-aws-credentials (role-to-assume via OIDC)
+#   2. amazon-ecr-login
+#   3. Extract registry and account ID from the ECR auth response
+#
+# Called by: build-push.yml (CI), and any future workflow that needs ECR push access
+#   e.g. deploy-preview, security-scan, cleanup-old-images
+#
+# Usage:
+#   jobs:
+#     ecr-auth:
+#       uses: ./.github/workflows/reusable/ecr-login.yml
+#       secrets:
+#         AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+#         AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+#
+# Inputs:
+#   aws-region:  AWS region (default: us-east-1)
+#   role-session-name: suffix for STS session (default: "ecr-login")
+#
+# Outputs:
+#   registry:   ECR registry URL, e.g. 478468080326.dkr.ecr.us-east-1.amazonaws.com
+#   account-id: 12-digit AWS account ID
+
+name: Reusable — ECR Login
+
+on:
+  workflow_call:
+    inputs:
+      aws-region:
+        description: "AWS region for ECR"
+        required: false
+        type: string
+        default: "us-east-1"
+      role-session-name:
+        description: "Session name suffix for STS role assumption"
+        required: false
+        type: string
+        default: "ecr-login"
+    secrets:
+      AWS_ROLE_ARN:
+        description: "ARN of the OIDC IAM role that GitHub Actions assumes"
+        required: true
+
+jobs:
+  ecr-auth:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+      account-id: ${{ steps.login-ecr.outputs.account }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: ${{ inputs.role-session-name }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2

@@ -1,0 +1,214 @@
+# Build and Push Docker Images — E-10 CI Pipeline
+# ======================================================================
+#
+# Trigger: push to main in the application repo (spring-petclinic-microservices)
+#   Only builds services whose directory changed — not all 8 every time.
+#
+# The build-push workflow:
+#   1. dorny/paths-filter detects which service directories changed
+#   2. Matrix-driven build — only services where `filter-output == 'true'`
+#   3. Docker Buildx + QEMU for linux/arm64 (Graviton) cross-compilation on x86 runners
+#   4. OIDC auth to AWS — no long-lived keys (configured via PETPLAT-52)
+#   5. Build layers: checkout → QEMU → OIDC → ECR login → build → Trivy scan → push → dispatch
+#
+# The repository_dispatch event (app-image-built) signals the platform repo
+# to update its helm-values/ files. ArgoCD then detects the tag change and
+# syncs the updated image.  This is the CI-only pipeline — ArgoCD handles CD.
+#
+# Required secrets (set in GitHub → Settings → Secrets and variables → Actions):
+#   AWS_ACCOUNT_ID       — 12-digit, e.g. 478468080326
+#   AWS_REGION           — us-east-1
+#   AWS_ROLE_ARN          — arn:aws:iam::<account>:role/petclinic-github-actions-build-role
+#   PLATFORM_REPO_TOKEN   — GitHub PAT with repo scope (contents:write) on petclinic-platform
+#   PLATFORM_REPO         — "amitmaurya001/eks-petclinic-platform" (owner/repo format)
+
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE_TAG: ${{ github.sha[:7] }}
+  PLATFORM_REPO: amitmaurya001/eks-petclinic-platform
+
+jobs:
+  # ======================================================================
+  # Job 1: Detect which services changed
+  # ======================================================================
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      config-server:       ${{ steps.filter.outputs.config-server }}
+      discovery-server:    ${{ steps.filter.outputs.discovery-server }}
+      api-gateway:         ${{ steps.filter.outputs.api-gateway }}
+      customers-service:   ${{ steps.filter.outputs.customers-service }}
+      visits-service:      ${{ steps.filter.outputs.visits-service }}
+      vets-service:         ${{ steps.filter.outputs.vets-service }}
+      genai-service:        ${{ steps.filter.outputs.genai-service }}
+      admin-server:        ${{ steps.filter.outputs.admin-server }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            config-server:
+              - 'spring-petclinic-config-server/**'
+            discovery-server:
+              - 'spring-petclinic-discovery-server/**'
+            api-gateway:
+              - 'spring-petclinic-api-gateway/**'
+            customers-service:
+              - 'spring-petclinic-customers-service/**'
+            visits-service:
+              - 'spring-petclinic-visits-service/**'
+            vets-service:
+              - 'spring-petclinic-vets-service/**'
+            genai-service:
+              - 'spring-petclinic-genai-service/**'
+            admin-server:
+              - 'spring-petclinic-admin-server/**'
+
+  # ======================================================================
+  # Job 2: Build and push — 1 per changed service
+  # ======================================================================
+  build:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.config-server == 'true' ||
+            needs.detect-changes.outputs.discovery-server == 'true' ||
+            needs.detect-changes.outputs.api-gateway == 'true' ||
+            needs.detect-changes.outputs.customers-service == 'true' ||
+            needs.detect-changes.outputs.visits-service == 'true' ||
+            needs.detect-changes.outputs.vets-service == 'true' ||
+            needs.detect-changes.outputs.genai-service == 'true' ||
+            needs.detect-changes.outputs.admin-server == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - ${{ fromJSON(needs.detect-changes.outputs.config-server == 'true' && '["config-server"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.discovery-server == 'true' && '["discovery-server"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.api-gateway == 'true' && '["api-gateway"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.customers-service == 'true' && '["customers-service"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.visits-service == 'true' && '["visits-service"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.vets-service == 'true' && '["vets-service"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.genai-service == 'true' && '["genai-service"]' || '[]') }}
+          - ${{ fromJSON(needs.detect-changes.outputs.admin-server == 'true' && '["admin-server"]' || '[]') }}
+
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      # ---------------------------------------------------------------
+      # Step 1: Checkout
+      # ---------------------------------------------------------------
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # Step 2: Set up Docker Buildx + QEMU (for linux/arm64 cross-compilation)
+      # ---------------------------------------------------------------
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---------------------------------------------------------------
+      # Step 3: OIDC auth to AWS — no long-lived keys
+      # ---------------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: petclinic-ci-${{ matrix.service }}
+
+      # ---------------------------------------------------------------
+      # Step 4: ECR login
+      # ---------------------------------------------------------------
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------------------------------------------------------------
+      # Step 5: Build the Docker image (linux/arm64)
+      # ---------------------------------------------------------------
+      - name: Build Docker image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+        run: |
+          SERVICE_REPO="petclinic-dev/${matrix/service}"
+          ECR_IMAGE="${ECR_REGISTRY}/${SERVICE_REPO}:${IMAGE_TAG}"
+
+          echo "Building ${ECR_IMAGE} — platform linux/arm64"
+
+          docker buildx build \
+            --file docker/Dockerfile \
+            --platform linux/arm64 \
+            --build-arg ARTIFACT_NAME=spring-petclinic-${matrix/service}-4.0.1 \
+            --provenance=false \
+            --load \
+            --tag "${ECR_IMAGE}" \
+            --build-arg EXPOSED_PORT=${{ fromJSON(
+              '{"config-server":"8888","discovery-server":"8761","api-gateway":"8080","customers-service":"8081","visits-service":"8082","vets-service":"8083","genai-service":"8084","admin-server":"9090"}'
+            )[matrix.service] }} \
+            .
+
+          echo "ecr_image=${ECR_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------
+      # Step 6: Trivy scan — FAIL ON CRITICAL (gates the push)
+      # ---------------------------------------------------------------
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.build.outputs.ecr_image }}
+          exit-code: 1
+          severity: CRITICAL
+          format: table
+
+      # ---------------------------------------------------------------
+      # Step 7: Push to ECR (only if Trivy passes)
+      # ---------------------------------------------------------------
+      - name: Push to ECR
+        if: success()
+        run: |
+          docker push "${ECR_REGISTRY}/petclinic-dev/${matrix/service}:${IMAGE_TAG}"
+          echo "Pushed: ${ECR_REGISTRY}/petclinic-dev/${matrix/service}:${IMAGE_TAG}"
+
+  # ======================================================================
+  # Job 3: Fire repository_dispatch to the platform repo
+  # ======================================================================
+  dispatch:
+    needs: [detect-changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire repository_dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
+          repository: ${{ vars.PLATFORM_REPO }}
+          event-type: app-image-built
+          client-payload: |
+            {
+              "sha": "${{ github.sha[:7] }}",
+              "services": "${{ needs.detect-changes.outputs.config-server == 'true' && 'config-server' || '' }} \
+                            ${{ needs.detect-changes.outputs.discovery-server == 'true' && 'discovery-server' || '' }} \
+                            ${{ needs.detect-changes.outputs.api-gateway == 'true' && 'api-gateway' || '' }} \
+                            ${{ needs.detect-changes.outputs.customers-service == 'true' && 'customers-service' || '' }} \
+                            ${{ needs.detect-changes.outputs.visits-service == 'true' && 'visits-service' || '' }} \
+                            ${{ needs.detect-changes.outputs.vets-service == 'true' && 'vets-service' || '' }} \
+                            ${{ needs.detect-changes.outputs.genai-service == 'true' && 'genai-service' || '' }} \
+                            ${{ needs.detect-changes.outputs.admin-server == 'true' && 'admin-server' || '' }}"
+            }
