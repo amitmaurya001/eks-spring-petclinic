@@ -17,6 +17,20 @@ target/
 # Visual Studio Code
 .factorypath
 
+# Block the specific large JAR file
+docker/*.jar
+
+# Block all compiled Java archives globally
+*.jar
+*.war
+*.ear
+
+# Block common build and target directories
+target/
+build/
+bin/
+
+
 # Branch switching
 generated/
 
