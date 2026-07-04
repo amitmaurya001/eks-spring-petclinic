@@ -33,7 +33,6 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
   ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
-  IMAGE_TAG: ${{ github.sha }}
   PLATFORM_REPO: amitmaurya001/eks-petclinic-platform
 
 jobs:
@@ -144,10 +143,11 @@ jobs:
         env:
           ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
         run: |
-          SERVICE_DIR="spring-petclinic-${matrix/service}"
-          SERVICE_REPO="petclinic-dev/${matrix/service}"
-          ECR_IMAGE="${ECR_REGISTRY}/${SERVICE_REPO}:${IMAGE_TAG}"
-          ARTIFACT_NAME="spring-petclinic-${matrix/service}-4.0.1"
+          SERVICE_DIR="spring-petclinic-${{ matrix.service }}"
+          SERVICE_REPO="petclinic-dev/${{ matrix.service }}"
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          ECR_IMAGE="${ECR_REGISTRY}/${SERVICE_REPO}:${SHORT_SHA}"
+          ARTIFACT_NAME="spring-petclinic-${{ matrix.service }}-4.0.1"
 
           echo "Building ${ECR_IMAGE} — platform linux/arm64"
 
@@ -178,8 +178,9 @@ jobs:
       - name: Push to ECR
         if: success()
         run: |
-          docker push "${ECR_REGISTRY}/petclinic-dev/${matrix.service}:${IMAGE_TAG}"
-          echo "Pushed: ${ECR_REGISTRY}/petclinic-dev/${matrix/service}:${IMAGE_TAG}"
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          docker push "${ECR_REGISTRY}/petclinic-dev/${{ matrix.service }}:${SHORT_SHA}"
+          echo "Pushed: ${ECR_REGISTRY}/petclinic-dev/${{ matrix.service }}:${SHORT_SHA}"
 
   # ======================================================================
   # Job 3: Fire repository_dispatch to the platform repo
@@ -217,6 +218,6 @@ jobs:
           event-type: app-image-built
           client-payload: |
             {
-              "sha": "${{ github.sha }}",
+              "sha": "${{ github.sha::7 }}",
               "services": "${{ steps.build_services.outputs.services }}"
             }
