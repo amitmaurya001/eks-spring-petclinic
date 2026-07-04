@@ -79,7 +79,14 @@ jobs:
   # ======================================================================
   build:
     needs: detect-changes
-    if: ${{ needs.detect-changes.outputs[matrix.service] == 'true' }}
+    if: ${{ needs.detect-changes.outputs['config-server'] == 'true' ||
+            needs.detect-changes.outputs['discovery-server'] == 'true' ||
+            needs.detect-changes.outputs['api-gateway'] == 'true' ||
+            needs.detect-changes.outputs['customers-service'] == 'true' ||
+            needs.detect-changes.outputs['visits-service'] == 'true' ||
+            needs.detect-changes.outputs['vets-service'] == 'true' ||
+            needs.detect-changes.outputs['genai-service'] == 'true' ||
+            needs.detect-changes.outputs['admin-server'] == 'true' }}
     strategy:
       fail-fast: false
       matrix:
