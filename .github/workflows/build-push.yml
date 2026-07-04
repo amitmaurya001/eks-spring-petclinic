@@ -194,8 +194,20 @@ jobs:
       - name: Build services list
         id: build_services
         run: |
+          # Convert JSON array to space-separated list for client-payload
+          # e.g. '"config-server","discovery-server"' -> 'config-server discovery-server'
           CHANGED='${{ needs.detect-changes.outputs.changed }}'
-          echo "services=${CHANGED}" >> "$GITHUB_OUTPUT"
+          # Strip brackets
+          WITHOUT_BRACKETS="${CHANGED#[}"
+          WITHOUT_BRACKETS="${WITHOUT_BRACKETS%]}"
+          # Replace escaped quotes with spaces
+          SERVICES="${WITHOUT_BRACKETS//\"/ }"
+          # Remove commas
+          SERVICES="${SERVICES//,/}"
+          # Strip leading/trailing whitespace
+          SERVICES="${SERVICES# }"
+          SERVICES="${SERVICES% }"
+          echo "services=${SERVICES}" >> "$GITHUB_OUTPUT"
 
       - name: Fire repository_dispatch
         uses: peter-evans/repository-dispatch@v4
