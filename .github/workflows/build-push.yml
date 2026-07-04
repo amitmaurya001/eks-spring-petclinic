@@ -90,12 +90,10 @@ jobs:
   # ======================================================================
   # Job 2: Build and push — one per changed service only
   #   Dynamic matrix: each matrix entry is one changed service
-  #   If no services changed, the entire build job is skipped
+  #   If no services changed, the matrix is empty and the job is automatically skipped
   # ======================================================================
   build:
     needs: detect-changes
-    if: |
-      fromJSON(needs.detect-changes.outputs.changed).length > 0
     strategy:
       fail-fast: false
       matrix:
