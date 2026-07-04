@@ -192,6 +192,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
       - name: Build services list
         id: build_services
         run: |
@@ -209,6 +211,8 @@ jobs:
           SERVICES="${SERVICES# }"
           SERVICES="${SERVICES% }"
           echo "services=${SERVICES}" >> "$GITHUB_OUTPUT"
+          # Also set short SHA
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Fire repository_dispatch
         uses: peter-evans/repository-dispatch@v4
@@ -218,6 +222,6 @@ jobs:
           event-type: app-image-built
           client-payload: |
             {
-              "sha": "${{ github.sha::7 }}",
+              "sha": "${{ steps.build_services.outputs.short_sha }}",
               "services": "${{ steps.build_services.outputs.services }}"
             }
