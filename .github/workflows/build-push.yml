@@ -111,7 +111,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: '17'
-          distribution: 'adopt'
+          distribution: 'temurin'
           cache: maven
 
       # ---------------------------------------------------------------
@@ -147,8 +147,6 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-        env:
-          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
       # ---------------------------------------------------------------
       # Step 7: Build the Docker image (linux/arm64)
@@ -219,7 +217,7 @@ jobs:
           echo "services=${SERVICES}" >> "$GITHUB_OUTPUT"
 
       - name: Fire repository_dispatch
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.PLATFORM_REPO_TOKEN }}
           repository: ${{ vars.PLATFORM_REPO }}

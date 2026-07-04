@@ -6,3 +6,4 @@ verify the genai3
 verify the genai4
 verify the genai5
 verify the genai6
+verify the genai7

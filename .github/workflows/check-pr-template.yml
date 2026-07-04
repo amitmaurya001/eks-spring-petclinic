@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure required labels exist
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const labels = [
@@ -37,7 +37,7 @@ jobs:
             }
 
       - name: Check non-project PR patterns then template completeness
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           # Classic PAT with read:org scope (store as repo/org secret ORG_READ_PAT).
           # Required to detect *private* org members — GITHUB_TOKEN only sees public ones.
@@ -226,7 +226,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Close PRs with incomplete template after 7 days of inactivity
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
