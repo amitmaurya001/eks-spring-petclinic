@@ -2,14 +2,15 @@
 # ======================================================================
 #
 # Trigger: push to main in the application repo (spring-petclinic-microservices)
-#   Only builds services whose directory changed — not all 8 every time.
+#   Builds only the services whose directory changed — not all 8 every time.
 #
 # The build-push workflow:
 #   1. dorny/paths-filter detects which service directories changed
-#   2. Matrix-driven build — only services where `filter-output == 'true'`
-#   3. Docker Buildx + QEMU for linux/arm64 (Graviton) cross-compilation on x86 runners
-#   4. OIDC auth to AWS — no long-lived keys (configured via PETPLAT-52)
-#   5. Build layers: checkout → QEMU → OIDC → ECR login → build → Trivy scan → push → dispatch
+#   2. detect-changes builds a JSON array of changed service names
+#   3. Dynamic matrix — only services in the array are built
+#   4. Docker Buildx + QEMU for linux/arm64 (Graviton) cross compilation
+#   5. OIDC auth to AWS (configure-aws-credentials via role assumption)
+#   6. Build → Trivy scan → Push → Dispatch to platform repo
 #
 # The repository_dispatch event (app-image-built) signals the platform repo
 # to update its helm-values/ files. ArgoCD then detects the tag change and
@@ -34,23 +35,18 @@ env:
   ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
   IMAGE_TAG: ${{ github.sha }}
   PLATFORM_REPO: amitmaurya001/eks-petclinic-platform
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ======================================================================
   # Job 1: Detect which services changed
+  #   Outputs: changed — JSON array of service names that have changes
+  #   e.g. ["admin-server"] when only admin-server/ directory changed
   # ======================================================================
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      config-server:       ${{ steps.filter.outputs.config-server }}
-      discovery-server:    ${{ steps.filter.outputs.discovery-server }}
-      api-gateway:         ${{ steps.filter.outputs.api-gateway }}
-      customers-service:   ${{ steps.filter.outputs.customers-service }}
-      visits-service:      ${{ steps.filter.outputs.visits-service }}
-      vets-service:         ${{ steps.filter.outputs.vets-service }}
-      genai-service:        ${{ steps.filter.outputs.genai-service }}
-      admin-server:        ${{ steps.filter.outputs.admin-server }}
+      changed: ${{ steps.filter-changed.outputs.changed }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -75,23 +71,36 @@ jobs:
             admin-server:
               - 'spring-petclinic-admin-server/**'
 
+      # Build JSON array from filter outputs — only 'true' values
+      # become members of the array.
+      - id: filter-changed
+        run: |
+          ITEMS=''
+          [ '${{ steps.filter.outputs.config-server }}' = 'true' ] && ITEMS="${ITEMS}\"config-server\","
+          [ '${{ steps.filter.outputs.discovery-server }}' = 'true' ] && ITEMS="${ITEMS}\"discovery-server\","
+          [ '${{ steps.filter.outputs.api-gateway }}' = 'true' ] && ITEMS="${ITEMS}\"api-gateway\","
+          [ '${{ steps.filter.outputs.customers-service }}' = 'true' ] && ITEMS="${ITEMS}\"customers-service\","
+          [ '${{ steps.filter.outputs.visits-service }}' = 'true' ] && ITEMS="${ITEMS}\"visits-service\","
+          [ '${{ steps.filter.outputs.vets-service }}' = 'true' ] && ITEMS="${ITEMS}\"vets-service\","
+          [ '${{ steps.filter.outputs.genai-service }}' = 'true' ] && ITEMS="${ITEMS}\"genai-service\","
+          [ '${{ steps.filter.outputs.admin-server }}' = 'true' ] && ITEMS="${ITEMS}\"admin-server\","
+          # Strip trailing comma, wrap in brackets
+          ITEMS="[${ITEMS%,}]"
+          echo "changed=${ITEMS}" >> "$GITHUB_OUTPUT"
+
   # ======================================================================
-  # Job 2: Build and push — 1 per changed service
+  # Job 2: Build and push — one per changed service only
+  #   Dynamic matrix: each matrix entry is one changed service
+  #   If no services changed, the entire build job is skipped
   # ======================================================================
   build:
     needs: detect-changes
-    if: ${{ needs.detect-changes.outputs['config-server'] == 'true' ||
-            needs.detect-changes.outputs['discovery-server'] == 'true' ||
-            needs.detect-changes.outputs['api-gateway'] == 'true' ||
-            needs.detect-changes.outputs['customers-service'] == 'true' ||
-            needs.detect-changes.outputs['visits-service'] == 'true' ||
-            needs.detect-changes.outputs['vets-service'] == 'true' ||
-            needs.detect-changes.outputs['genai-service'] == 'true' ||
-            needs.detect-changes.outputs['admin-server'] == 'true' }}
+    if: |
+      fromJSON(needs.detect-changes.outputs.changed).length > 0
     strategy:
       fail-fast: false
       matrix:
-        service: [config-server, discovery-server, api-gateway, customers-service, visits-service, vets-service, genai-service, admin-server]
+        service: ${{ fromJSON(needs.detect-changes.outputs.changed) }}
 
     runs-on: ubuntu-latest
     permissions:
@@ -99,14 +108,8 @@ jobs:
       contents: read
 
     steps:
-      # ---------------------------------------------------------------
-      # Step 1: Checkout
-      # ---------------------------------------------------------------
       - uses: actions/checkout@v7
 
-      # ---------------------------------------------------------------
-      # Step 2: Set up JDK 17 (for Maven build)
-      # ---------------------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -114,15 +117,9 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # ---------------------------------------------------------------
-      # Step 3: Build all Maven artifacts (produces the jar files)
-      # ---------------------------------------------------------------
       - name: Build with Maven
         run: mvn -B package --file pom.xml -DskipTests
 
-      # ---------------------------------------------------------------
-      # Step 4: Set up Docker Buildx + QEMU (for linux/arm64 cross-compilation)
-      # ---------------------------------------------------------------
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
@@ -131,9 +128,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # ---------------------------------------------------------------
-      # Step 5: OIDC auth to AWS — no long-lived keys
-      # ---------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -141,16 +135,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: petclinic-ci-${{ matrix.service }}
 
-      # ---------------------------------------------------------------
-      # Step 6: ECR login
-      # ---------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ---------------------------------------------------------------
-      # Step 7: Build the Docker image (linux/arm64)
-      # ---------------------------------------------------------------
       - name: Build Docker image
         id: build
         env:
@@ -163,9 +151,6 @@ jobs:
 
           echo "Building ${ECR_IMAGE} — platform linux/arm64"
 
-          # The jar is at: ${SERVICE_DIR}/target/${ARTIFACT_NAME}.jar
-          # Set build context to the service subdirectory so the Dockerfile
-          # can COPY the jar relative to the context
           cp "${SERVICE_DIR}/target/${ARTIFACT_NAME}.jar" "${ARTIFACT_NAME}.jar"
 
           docker buildx build \
@@ -182,9 +167,6 @@ jobs:
 
           echo "ecr_image=${ECR_IMAGE}" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------------
-      # Step 6: Trivy scan — FAIL ON CRITICAL (gates the push)
-      # ---------------------------------------------------------------
       - name: Trivy scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -193,28 +175,27 @@ jobs:
           severity: CRITICAL
           format: table
 
-      # ---------------------------------------------------------------
-      # Step 7: Push to ECR (only if Trivy passes)
-      # ---------------------------------------------------------------
       - name: Push to ECR
         if: success()
         run: |
-          docker push "${ECR_REGISTRY}/petclinic-dev/${matrix/service}:${IMAGE_TAG}"
+          docker push "${ECR_REGISTRY}/petclinic-dev/${matrix.service}:${IMAGE_TAG}"
           echo "Pushed: ${ECR_REGISTRY}/petclinic-dev/${matrix/service}:${IMAGE_TAG}"
 
   # ======================================================================
   # Job 3: Fire repository_dispatch to the platform repo
+  #   Runs even if build fails — always dispatches the sha + list of
+  #   changed services so the platform repo can update helm-values.
   # ======================================================================
   dispatch:
-    needs: [detect-changes, build]
+    needs: [detect-changes]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Build services list
         id: build_services
         run: |
-          SERVICES="${{ needs.detect-changes.outputs.config-server == 'true' && 'config-server' || '' }} ${{ needs.detect-changes.outputs.discovery-server == 'true' && 'discovery-server' || '' }} ${{ needs.detect-changes.outputs.api-gateway == 'true' && 'api-gateway' || '' }} ${{ needs.detect-changes.outputs.customers-service == 'true' && 'customers-service' || '' }} ${{ needs.detect-changes.outputs.visits-service == 'true' && 'visits-service' || '' }} ${{ needs.detect-changes.outputs.vets-service == 'true' && 'vets-service' || '' }} ${{ needs.detect-changes.outputs.genai-service == 'true' && 'genai-service' || '' }} ${{ needs.detect-changes.outputs.admin-server == 'true' && 'admin-server' || '' }}"
-          echo "services=${SERVICES}" >> "$GITHUB_OUTPUT"
+          CHANGED='${{ needs.detect-changes.outputs.changed }}'
+          echo "services=${CHANGED}" >> "$GITHUB_OUTPUT"
 
       - name: Fire repository_dispatch
         uses: peter-evans/repository-dispatch@v4
